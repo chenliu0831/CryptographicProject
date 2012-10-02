@@ -1,0 +1,98 @@
+        CSE506-S12 Homework Assignment Solution #1
+		 				Author:Chenyang Liu
+						ID:    108036433
+
+* COPYING
+
+The following programs, sys_xcrypt and xcipher, are free software with GPL.
+ 
+* OVERVIEW
+
+In this assignment I implement a system call, sys_xcrypt, for file encryption and decryption. For the encryption/decryption part, the system call uses CBC mode on pages and multiple cipher algorithms with user-defined encryption block size is supported. The program is loaded into the kernel by a loadable kernel module. I also provide an user-space program xcipher for testing the system call.
+
+* BUILD AND INSTALL INSTRUCTIONS
+
+1) Kernel Build Option
+
+I enclose the .config file as kernel.config in the git submission. Just rebuild the kernel using this config file should be good.
+
+2) Kernel Source Hacks
+
+Starting from 2.6, system calls table is no longer exported. You'll have to hack the kernel to export the sys_call_table symbol and add new system call prototype. Using a system call wrapper function, we could dynamically load the actual implementation as a kernel module. I modified the following file:
+
+/arch/x86/kernel/entry_32.S: Add write permission to sys_call_table.
+
+/arch/x86/kernel/syscall_table_32.S: Allocate space for our new syscall at the end of table
+
+/arch/x86/include/asm/unistd_32.h: Assign new syscall number for the new syscall
+
+/arch/x86/include/asm/syscalls.h,/include/linux/syscalls.h: Add new syscall function prototype.
+
+Kernel Makefile: Add source file folder to core-y
+
+3) Userspace Tools
+
+Before you can build the kernel module and userspace program, you have to make sure Openssl and Openssl-devel are installed in you machine. If not, run the following command(under CentOS):
+
+yum install openssl; yum install openssl-devel
+
+Then you'll have the required library and header file for the userspace program.
+
+4) Install and Test
+
+Under the hw1/ directory, doing a "make all" will produce a kernel module sys_xcrypt.ko and an executable xcipher. To save your time, I have enclosed a general_Test.sh for building and loading the kernel module and a set of general test for this program. Notice all extra credit functions are also tested at the end of this file. In addition, a shell script named exception_Test.sh is included for testing bad inputs and clean.sh for remove all resulting file. Hope it all runs good in your machine.
+
+* DESIGN DETAILS
+
+1) Userspace Parameters validation
+
+The userspace parameter is stored in a xcrypt_args struct and passes to the kernel space. I check for the following bad parameters:
+
+--- Unable to read argument struct from userspace (e.g.Null argument, bad address);
+--- Input file or output file cannot be read/written (e.g.Read-only FS, wrong filename).
+--- Input or output file is not regular.
+--- Input and output file point to the same file.
+--- Wrong key or different cipher type. (See below section)
+
+2) Preamble Design and Verification
+
+For every file I use a fix-length preamble of PAGE_CACHE_SIZE long. The preamble includes:
+
+--- Original file size (used in later decryption to verify decrypted file size);
+--- Initialization Vector(IV). This is used in CBC mode;
+--- MD5 checksum of the key from userspace. When decrypting, the system call handler will first check this to validate the key; 
+
+Below is for extra credit 2&3
+
+--- Key length. Support for user-defined key length;
+--- Encryption chunk size. Support for user-defined encryption unit size;
+--- MD5 checksum of the cipher algorithm name. Support for custom cipher algorithm, default cbc(aes);
+
+When decrypting, we will check to see if the MD5 checksum of the key can match the one stored in the preamble. Also check the key length and cipher algorithm name is identical.
+If key checksum and key length doesn't match, we return -EKEYREJECTED. If cipher algorithm is different, we return -EMEDIUMTYPE;
+
+3) Key size and IV selection
+
+By default, we use Sha1 algorithm to generate 128-bit secure hash in the user space to be the key and pass it to the kernel. If -l is specified in the user command, custom key length is also supported. If extra credit is enabled, we use the 16-byte IV as follows: 
+
+--- First 8 bytes are the index of the page buffer
+
+--- The remaining 8 bytes is the inode number of the file;
+ 
+4) Encryption/Decryption and Padding scheme
+
+After parameters and preamble validation, we use the correct key to encrypt/decrypt the input file. The encryption is done under CBC mode on every page. The padding scheme is borrowed from the linux kernel source: net/ceph/crypto.c.
+ 
+For every page and block, we pad it to the multiples of 16 using 16 - (block_size mod 16). Therefore, when decryption we can simply tract the last element of the padded page(size of block size +16) and substract that many element to recover the original block. As the result, every file must be of multiples of 16 big.
+
+5) Zero file and Partial file cleanup
+
+We handle zero file as well. Zero file is encrypted as the preamble plus nothing else. If anything bad happens during the encryption/decryption, we remove the partial ouput file.
+
+6) Userspace program
+
+We use getopt(3) to process command line arguments. The userspace program accepts any error infomation from the kernel and cast it to meaningful error information.
+
+* EXTRA CREDITS
+
+By default I enable the EXTRA_CREDIT macro and you can safely using normal functionalities under this mode. I implement all three extra credits. Some ciphers in the CryptoAPI must be matched with special key length and encryption blocks. Currently not all combinations are supported. 

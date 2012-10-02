@@ -1,0 +1,74 @@
+SE506 Final Project: Design Documentation
+
+Title:  Access Control List Security Model in eCryptfs  
+
+
+Date: 4/9/2012
+
+Group Members:
+       Chenyang Liu    108036433    chenliu@cs.sunysb.edu
+       Yu Zhang           108152971    yuzhang4@cs.sunysb.edu
+       Yangting Zhang 108112672    yanzhang@cs.sunysb.edu
+
+
+Introduction
+---------------
+1. Access Control List (ACL)
+An access control list (ACL), is a list of permissions attached to an object. An ACL consists of a set of ACL entries. An ACL entry specifies the access permissions on the associated object for an individual user or a group of users as a combination of read, write and search/execute permissions. Each file system object is associated with a list of Access Control Entries (ACEs), which define the permissions of the file owner ID, the file group ID, additional users and groups, and others. An ACL entry contains an entry tag type, an optional entry tag qualifier, and a set of permissions. A valid ACL contains exactly one entry with each of the ACL_USER_OBJ, ACL_GROUP_OBJ, and ACL_OTHER tag types. 
+
+A process may request read, write, or execute/search access to a file object protected by an ACL. This request would be dealt with by an access check algorithm.
+
+2. eCryptfs
+eCryptfs is a stackable Linux file system that integrates file encryption into the FS. In eCryptfs, cryptographic metadata is stored as preamble in the head of each file, thus encrypted files can be moved or copied between devices. Files can be decrypted with correct key in the Linux kernel keyring. 
+
+Goal
+------
+Add ACL support to ecryptfs. For a list of access operations, we can make each of them available to some specific users, groups, processes, etc. Only the processes with ACL permitted UID, primary GID, PID, SID, or time-of-day can access the file. Also, a deny-all or allow-all policy might be implemented.
+
+Design
+---------
+1. ACL in eCryptfs
+
+Natively, eCryptfs doesn't support ACL and only basic permission check by the vfs is done. We provide finer privilege control by adding a ACL permission check block right before the eCryptfs touches the file structure. Only processes passed this layer enter the encryption/decryption routine next.
+
+Access Control Entries (ACEs) include the following attributes:
+UID, primary GID, PID or process name, SID (Session ID), or time-of-day.
+
+Notice all these attributes are in different ACEs but to pass the permission check the process has to match all attributes. We adopt the security policy of deny-all that rejects any file that fails to pass all conditions. The ACL data is stored persistently in the extended attribute subsystem of the inode. Conversion between on-disk and in-memory representation is easily done as kernel provides a bunch of handy generic helper routines.
+
+2. Userspace Tool
+
+Linux doesnt have a system call for setting ACLs. Instead it is passed to the kernel as the Extended Attributes. We will provide a userspace program using ioctl to set the six ACL attributes to a file. Ioctl is a better way to communicate with the filesystem.
+
+3. Filename Visibility (Optional)
+
+The ACL provides another possibility to further security. We hide the filename for unprivileged user by adding ACL permission check at the readdir() operation. Thus, every file is only visible to those processes that deserve to see it.
+
+4. Binaries Checksum (Optional)
+
+To further improve security, binaries should be related with a integrity checksum. A valid administrator should be in charge of update the safe checksum. The checksum database data may be persistently stored at the super_block of the file system. Possible stronger encryption like PKI may be used to handle this.
+
+Test
+------
+1. Functionality Testing
+We are going to conduct a bunch of experiments to show that the eCryptfs supports ACL correctly and robustly:
+   a). Create a file, set its ACL to be different combinations of UIDs, GIDs, PIDs, etc, test whether it is accessible to different users.
+   b). Create a file, set its ACL, let multiple users request to access this file concurrently. This could be used to measure the scalability and concurrency.
+   c). For the user level program, attempt to pass different combinations of arguments, to see how the program would handle invalid arguments.
+
+2. Performance Testing
+We will also evaluate overhead of the extended ACL eCryptfs compared with the vanilla eCryptfs. 
+
+References
+---------------
+1. https://launchpad.net/ecryptfs
+2. ACL manual in Linux Kernel
+3. Michael Austin Halcrow, eCryptfs: An Enterprise-class Encrypted Filesystem for Linux.
+
+
+
+
+
+
+
+

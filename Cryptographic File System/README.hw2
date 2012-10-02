@@ -1,0 +1,150 @@
+		CSE506-S12 Homework Assignment Solution #1
+		 				Author:Chenyang Liu
+						ID:    108036433
+
+* COPYING
+
+Wrapfs With Cryptographic Extension. Copyright 2011-2012 Chenyang Liu
+
+All files under hw2-chenliu/fs/wrapfs, are free software with GPL.
+
+*OVERVIEW
+
+In this assigment I implemented a native linux cryptographic file system by adding address space operations and CTR-Mode data encryption/decryption on top of a stackable file system, Wrapfs. I intercept the address space operation and implement file encryption/decryption on a per-page basis using CTR mode. I use AES 256 in the kernel and use PKCS at userland to generate secure hash as the key to pass into kernel. Key is passed by ioctl and I intercept the ioctl method in wrapfs to do the checking and setting. The resulted file system is tested under LTP and pass most tests. For the Extra Credit, I finish the file name encryption part and add debug/tracing support.
+
+* USAGE & OPTIONS
+
+1) Build and install
+
+By default, WRAPFS_CRYPTO and EXTRA_CREDIT is commented off at the makefile of fs/wrapfs.That's the initial state for submission. Running a make in root dir will build the wrapfs as a module.
+
+To build the userspace program, please go to the fs/wrapfs/ directory and run a make there. A userspace program "manage_key" will show up and you can use that to setup key.
+
+2) Install
+
+First mount the wrapfs. For example,
+
+mount -t wrapfs /n/scratch /tmp -o mmap
+
+Because the ioctl need a file descriptor first, you can use touch command to create a dummy file. Then you can use our manage_key program to set key. E.g.
+
+touch /tmp/dummy
+
+./manage_key -s chenliu0831 /tmp/dummy
+
+Then you can use this password to create other files. Notice if you can change key but there will be only one key per mount instance. And each file can only be opened by its own key.
+
+To revoke a key,
+
+./manage_key -r file
+
+Now you can't do anything of encrypting. I also define a test macro in the Makefile, you can enable it when doing LTP test, that will save the time to set the key. FYI: My ioctl number is 0x43.
+
+
+* LTP TEST
+
+The file system built with only mmap option pass fs, mm, syscall,etc test without introducing extra fail case then the vanilla wrapfs.
+
+When crypto is used, a mm test of sparse file is failed. The current code cannot handle file of holes. So sparse file is simply not supported in this version.
+
+*Design Details
+
+1. Address Space Operation Interception
+
+In a stackable cryptographic file system, we need to change the data across layers for encryption and decryption. Therefore, we have to intercept address space operations into the file system. A mount-time option is supported to enable address space operations. In my design, the upper page always contains the plaintext and the lower page contains the ciphertext. Plaintext is not store anywhere in the lower file system.
+
+I follow the Unionfs implementation of writepage and the Ecryptfs design for all other address space ops. After adding crypto support, I change all to Ecryptfs design.
+
+I implement the following operations:
+
+1)wrapfs_writepage
+
+Writepage is called to sync page to disk. First the corresponding lower_page is found and the upper page is encrypted and copied to the lower_page. After that the lower level writepage function is called to write-back the dirty page to disk. Related attributes are updated.
+
+2)wrapfs_readpage
+
+Readpage is called to read the lower file and decrypt the data to the upper page. It is called from the generic file read routine.Related attributes are updated.
+
+3)wrapfs_write_begin
+
+Used by the generic file write routine. Write_begin and write_end function listed below are used in pairs. Page is allocated from upper page cache. If this page is not up-to-date, it is revalidated by decrypting from the lower file.
+
+4)wrapfs_write_end
+
+Used to encrypt the plaintext and pass the encrypted data to the lower file. I encrypt the upper page to a tmp_page and write it to the lower_file. Attributes like access time are updated. 
+
+
+2. Crypto Functions Design and Implementation
+
+1) Crypto information persistency
+
+Inspired by the design of ecryptfs, I implement a wrapfs_crypt_stat struct to for storing crypto information. I modify the super block private data of wrapfs to add a field for it. The wrapfs_crypt_stat struct is as follows:
+
+#define WRAPFS_KEY_SET   0x00000001
+#define WRAPFS_KEY_NULL  0x00000002
+struct wrapfs_crypt_stat{
+        
+	u32 flags;
+        size_t iv_bytes;
+	size_t key_size;
+
+	struct crypto_blkcipher *tfm;
+	struct crypto_hash *hash_tfm;
+	unsigned char key[WRAPFS_MAX_KEY_LEN];
+	unsigned char root_iv[WRAPFS_MAX_IV_LEN];
+	
+	
+	struct mutex cs_tfm_mutex;
+	struct mutex cs_hash_tfm_mutex;
+	
+
+};
+
+This struct is designed to easy the encryption/decryption routine. At mount time, the .tfm structures for blkcipher and hash are allocated and everyone after that can safely use it. The two mutexes are provided to protect the corresponding struct and they init at mount time. The memory is freed at the umount time.
+
+The flags field is a bitmap  set by the ioctl method to indicate if key is valid now. The top two macros serve this purpose. It is tested whenever we enter crypto-related routine.  The root_iv is initialzed by a MD5 hash of the key and is used in later crypto operations. Other fields are self-explanatory. 
+
+This struct is stored at WRAPFS_SB_INFO and is easily extracted using WRAPFS_SB(sb)->crypt_stat; 
+
+2). Crypto Mode Selection
+
+I choose to use CTR mode with IV to avoid padding issues. The program can also run under CBC mode but there are NULL charaters at the end of file.
+
+3). Key Setting and Revoking.
+
+The Key is set by the userland program "manage_key". It uses PKCS5 to generate a 256-bit hash of the user-provided key and use that as the passphrase to kernel. I intercept the wrapfs_unlock_ioctl method to copy the key from userland or set up the WRAPFS_KEY_NULL flag to revoke the key. All user-space memory area is verified in the kernel first and then copied.
+
+* EXTRA_CREDIT
+
+A1. Filename Encryption
+
+I follow the implmentation of ecryptfs. At the time of this commit, the file encryption part works as expected: File name is encrypted to prefix plus legal random string. The decryption part contains bug.
+
+The plaintext filename is first encrypted to random string. I use CTR(aes) to encrypt it. Then it is encoded on a block basis and a predefined prefix is added. I borrow the encoding function from ecryptfs to change the encrypted string into a reversible legal string. 
+
+For the encryption of filename, I intercept the wrapfs_look_up function to encode and encrypt the file name in the dentry. 
+
+The decryption function is similar and I intercept the readlink function and readdir function. But there are some bugs causing kenerl oops till now. 
+
+B. Debugging/Tracing Support
+
+This is easily done by adding another mount time option "debug=%u". I use a global varible to keep the user provided bitmap mask. I define a set of macros for each kind of operation. Also I implmented a UDBG_EXIT(err) macro to print out exiting debug informations. Functions in one category of operations will first test if the corresponding bit is set and ouput debug information. E.g.
+
+mount -t wrapfs /n/scratch /tmp -o mmap,debug=127
+
+The bit mask is as follows:
+
+#define DBG_SB_OP        0x00000001
+#define DBG_INODE_OP     0x00000002
+#define DBG_DENTRY_OP    0x00000004
+#define DBG_FILE_OP      0x00000010
+#define DBG_ADDR_OP      0x00000020
+#define DBG_OTHER_OP     0x00000040
+
+*BUGS
+
+Known bugs for extra credit 1. Fail to decrypt and encrypt . and .. Decrpytion cause kernel oops.
+
+
+
+
